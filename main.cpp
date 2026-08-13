@@ -1,296 +1,329 @@
-// 2023 08 14 (Added Solfeggio and adjusted timing)
-// Chakra Frequencies are tuned to 432Hz
-// 7 of 9 Solfeggio aligned with chakras
-// HiLo Nogier frequencies mixed with Solfeggio
+// SSFH-PEMF — Spread Spectrum Frequency Hopping Pulsed Electro-Magnetic Field
+// Drives a FeelTech FY3200S function generator from a Particle Photon.
 //
-// 8/4 Time Signature (Twice as Long as Standard) as 90 BPM
-//     In 8/4 time, one measure lasts for 8 quarter notes, or 5333.33 ms.
-//     (333 ms) would fit 16 times into this measure.
-//     (666 ms) would fit 8 times into this measure.
-//     (1333 ms) would fit 4 times into this measure.
+// Timing Model (8/4 time signature at 90 BPM):
+//   - One musical measure = 5333 ms
+//   - Long cycle (master rhythm): 10368 ms (~2 measures)
+//   - Chakra updates: every 648 ms
+//   - SolNog updates: every 1152 ms
 //
-// Place all global variables and constants inside a namespace
+// Chakra frequencies are tuned to 432 Hz base. Combines 7 Solfeggio tones
+// with Nogier frequencies (low + high pairs) in a randomized hopping pattern.
+// LED feedback indicates sync (magenta blink), Chakra-dominant (green), or
+// SolNog-dominant (orange) states.
+
+#include "Particle.h"
+
+// All constants and configuration live in an anonymous namespace
 namespace
 {
-    // unsigned char datatype encodes numbers from 0 to 255. Prefer the byte data type for consistency of Arduino programming style.
-    // unsigned int 0 to 4,294,967,295 (42,949,672.95) 4bytes (32-bit) (2^32 - 1).
-
-    // using the built in LED (Blue LED on the Photon is next to pin D7.)
+    // Hardware
     const pin_t ledPin = D7;
-    
-    // Set some global variables available anywhere in the program
-    // Millisecond delay after setting a parameter
-    const unsigned int sP = 555;
 
-    // Get a random seed from the hardware RNG
-    uint32_t seed = HAL_RNG_GetRandomNumber();
+    // Parameter delay after each command sent to FY3200S (ms)
+    const unsigned long commandDelayMs = 555;
 
-    // Set a long period for both Channels
-    const unsigned int longPeriod = 10368;
-    // Set a short period for Chakra Channel
-    const unsigned int periodChakra = 648;
-    // Set a short period for SolNog Channel
-    const unsigned int periodSolNog = 1152;
+    // Timing periods (all in milliseconds)
+    const unsigned long longPeriodMs   = 10368;  // Master rhythm / random reseed
+    const unsigned long chakraPeriodMs = 648;
+    const unsigned long solnogPeriodMs = 1152;
 
-    // Main Wave：(sine bw0, square bw1, triangle bw2)
-    const unsigned char wave = 0;
-    // Main Duty：set duty cycle bd1000 = 100%
-    const unsigned int duty = 500;
-    // Main Amplitude: ba2000 = 20vpp
-    const unsigned int amplitude = 1900;
+    // Main output parameters for FY3200S
+    const unsigned char  mainWave      = 0;     // 0 = sine
+    const unsigned int   mainDuty      = 500;   // 50% duty cycle (bd500)
+    const unsigned int   mainAmplitude = 1900;  // ~19 Vpp (ba1900)
 
-    // Initialize start timer variables
-    unsigned int startLongMillis = 0;
-    unsigned int startChakraMillis = 0;
-    unsigned int startSolNogMillis = 0;
+    // RNG seed from hardware
+    uint32_t rngSeed = HAL_RNG_GetRandomNumber();
 
-    unsigned int currentLongMillis;
-    unsigned int currentChakraMillis;
-    unsigned int currentSolNogMillis;
+    // Current state for frequency selection and LED feedback
+    unsigned char currentChakra       = 0;  // 0–6 (Crown → Root)
+    unsigned char currentChakraLevel  = 0;  // 0–3 intensity level
+    unsigned char currentSolNogIndex  = 0;  // 0–6 for SolNog table
 
-    unsigned char xC; // init Two-Dimensional Array selector X for Chakra Channel
-    unsigned char yC; // init Two-Dimensional Array selector Y for Chakra Channel
+    // === Frequency Tables ===
 
-    unsigned char xN; // init Two-Dimensional Array selector X for SolNog Channel
-    unsigned char yN; // init Two-Dimensional Array selector Y for SolNog Channel
+    // Nogier frequencies (low + high paired) - indexed 0..6
+    const unsigned int NogierLow[7] = {
+        228,    // A - Cellular Vitality & repair
+        456,    // B - Nutritional Metabolism
+        913,    // C - Movement & coordination
+        1825,   // D - Bilateral integration
+        3650,   // E - Nerves & pain relief
+        7341,   // F - Emotional balance
+        14681   // G - Intellectual organization
+    };
 
-    // Nogier frequencies
-    const unsigned int AlowCellularVitality = 228; // Cell vitality, tissue repair, acute inflammation, skin & mucous membranes, “openings,” general tonification, first-aid / regenerative support
-    const unsigned int AhighCellularVitality = 29363; // Cell vitality, tissue repair, acute inflammation, skin & mucous membranes, “openings,” general tonification, first-aid / regenerative support
-    const unsigned int BlowNutritionalMetabolism = 456; // Nutrition, digestion, assimilation, metabolism, abdominal organs, cellular cohesion / nutritional ground regulation 
-    const unsigned int BhighNutritionalMetabolism = 58725; // Nutrition, digestion, assimilation, metabolism, abdominal organs, cellular cohesion / nutritional ground regulation
-    const unsigned int ClowMovement = 913; // Locomotor system: muscles, ligaments, joints, movement, posture, coordination
-    const unsigned int ChighMovement = 117450; // Locomotor system: muscles, ligaments, joints, movement, posture, coordination.
-    const unsigned int DlowCoordination = 1825; // Laterality & bilateral integration; cross-talk of nutritional + locomotor systems; sometimes circulation / “stuck” chronic patterns
-    const unsigned int DhighCoordination = 234900; // Laterality & bilateral integration; cross-talk of nutritional + locomotor systems; sometimes circulation / “stuck” chronic patterns
-    const unsigned int ElowNerves = 3650; // Spinal cord, nerve conduction, pain (esp. chronic), analgesia
-    const unsigned int EhighNerves = 937528; // Spinal cord, nerve conduction, pain (esp. chronic), analgesia
-    const unsigned int FlowEmotionalReactions = 7341; //  Subcortical / emotional brain, autonomic & hormonal balance, mood, anxiety/depression-type state
-    const unsigned int FhighEmotionalReactions = 934400; //  Subcortical / emotional brain, autonomic & hormonal balance, mood, anxiety/depression-type state
-    const unsigned int GlowIntellectualOrganization = 14681; //  Cerebral cortex, mental organization, concentration, intellectual fatigue, psychosomatic / cortical level
-    const unsigned int GhighIntellectualOrganization = 1868800; //  Cerebral cortex, mental organization, concentration, intellectual fatigue, psychosomatic / cortical level
-    
-    //Chakra frequencies
-    const unsigned int SAHASRARA1 = 10800;
-    const unsigned int SAHASRARA2 = 21600;
-    const unsigned int SAHASRARA3 = 43200;
-    const unsigned int SAHASRARA4 = 86333;
-    const unsigned int AJNA1 = 14400;
-    const unsigned int AJNA2 = 28833;
-    const unsigned int AJNA3 = 57600;
-    const unsigned int AJNA4 = 115500;
-    const unsigned int VISHUDDHA1 = 19266;
-    const unsigned int VISHUDDHA2 = 38466;
-    const unsigned int VISHUDDHA3 = 76899;
-    const unsigned int VISHUDDHA4 = 937528;
-    const unsigned int ANAHATA1 = 12833;
-    const unsigned int ANAHATA2 = 25700;
-    const unsigned int ANAHATA3 = 51400;
-    const unsigned int ANAHATA4 = 102800;
-    const unsigned int MANIPURA1 = 18166;
-    const unsigned int MANIPURA2 = 36366;
-    const unsigned int MANIPURA3 = 72666;
-    const unsigned int MANIPURA4 = 145200;
-    const unsigned int SVADHISTHANA1 = 15266;
-    const unsigned int SVADHISTHANA2 = 30533;
-    const unsigned int SVADHISTHANA3 = 61133;
-    const unsigned int SVADHISTHANA4 = 122100;
-    const unsigned int MULADHARA1 = 11433;
-    const unsigned int MULADHARA2 = 22900;
-    const unsigned int MULADHARA3 = 45733;
-    const unsigned int MULADHARA4 = 91500;
+    const unsigned int NogierHigh[7] = {
+        29363,   // A high
+        58725,   // B high
+        117450,  // C high
+        234900,  // D high
+        937528,  // E high (shared with Vishuddha Throat Level 4)
+        934400,  // F high
+        1868800  // G high
+    };
 
-    // Solfeggio frequencies
-    const unsigned int SolfeggioTI = 96300; // Reconnecting with spirit, higher self & oneness
-    const unsigned int SolfeggioLA = 85200; // Spiritual awakening & connection to higher self
-    const unsigned int SolfeggioSO = 74100; // Internal cleansing & intuitive awakening
-    const unsigned int SolfeggioFA = 63900; // Improved communication & relationships
-    const unsigned int SolfeggioMI = 52800; // Pure love, miracles & DNA repair
-    const unsigned int SolfeggioRE = 41700; // Releasing past traumas, facilitating change
-    const unsigned int SolfeggioUT = 39600; // Releasing guilt, negativity & fear
-    const unsigned int SolfeggioDO = 28500; // Tissue regeneration & internal healing
-    const unsigned int SolfeggioOT = 17400; // Pain relief (physical / emotional / karmic)
-    
+    // Solfeggio frequencies - aligned with the 7 chakras (index 0..6)
+    const unsigned int Solfeggio[7] = {
+        28500,  // DO  - Tissue regeneration (Root)
+        39600,  // UT  - Releasing guilt/fear (Sacral)
+        41700,  // RE  - Facilitating change (Solar Plexus)
+        52800,  // MI  - DNA repair & love (Heart)
+        63900,  // FA  - Relationships & communication (Throat)
+        74100,  // SO  - Intuitive awakening (Third Eye)
+        85200   // LA  - Spiritual awakening (Crown) — 96300 used in other contexts
+    };
 
-    const unsigned int SolNog[3][7] = {
-        {SolfeggioDO, SolfeggioUT, SolfeggioRE, SolfeggioMI, SolfeggioFA, SolfeggioSO, SolfeggioLA},
-        {AlowCellularVitality, BlowNutritionalMetabolism, ClowMovement, DlowCoordination, ElowNerves, FlowEmotionalReactions, GlowIntellectualOrganization},
-        {AhighCellularVitality, BhighNutritionalMetabolism, ChighMovement, DhighCoordination, EhighNerves, FhighEmotionalReactions, GhighIntellectualOrganization}};
+    // === Chakra Frequencies ===
+    // One clean array per chakra (easy to read and maintain)
 
-    const unsigned int Chakra[4][7] = {
-        {SAHASRARA1, AJNA1, VISHUDDHA1, ANAHATA1, MANIPURA1, SVADHISTHANA1, MULADHARA1},
-        {SAHASRARA2, AJNA2, VISHUDDHA2, ANAHATA2, MANIPURA2, SVADHISTHANA2, MULADHARA2},
-        {SAHASRARA3, AJNA3, VISHUDDHA3, ANAHATA3, MANIPURA3, SVADHISTHANA3, MULADHARA3},
-        {SAHASRARA4, AJNA4, VISHUDDHA4, ANAHATA4, MANIPURA4, SVADHISTHANA4, MULADHARA4}};
+    const unsigned int Sahasrara_Crown[4] = {
+        10800,  // Level 1
+        21600,  // Level 2
+        43200,  // Level 3
+        86333   // Level 4
+    };
+
+    const unsigned int Ajna_ThirdEye[4] = {
+        14400,   // Level 1
+        28833,   // Level 2
+        57600,   // Level 3
+        115500   // Level 4
+    };
+
+    const unsigned int Vishuddha_Throat[4] = {
+        19266,   // Level 1
+        38466,   // Level 2
+        76899,   // Level 3
+        937528   // Level 4 (also appears in Nogier E-high)
+    };
+
+    const unsigned int Anahata_Heart[4] = {
+        12833,  // Level 1
+        25700,  // Level 2
+        51400,  // Level 3
+        102800  // Level 4
+    };
+
+    const unsigned int Manipura_SolarPlexus[4] = {
+        18166,  // Level 1
+        36366,  // Level 2
+        72666,  // Level 3
+        145200  // Level 4
+    };
+
+    const unsigned int Svadhisthana_Sacral[4] = {
+        15266,  // Level 1
+        30533,  // Level 2
+        61133,  // Level 3
+        122100  // Level 4
+    };
+
+    const unsigned int Muladhara_Root[4] = {
+        11433,  // Level 1
+        22900,  // Level 2
+        45733,  // Level 3
+        91500   // Level 4
+    };
+
+    // Simple lookup: Chakra[chakraIndex] gives the 4-level array for that chakra.
+    // Order: 0=Crown, 1=Third Eye, 2=Throat, 3=Heart, 4=Solar Plexus, 5=Sacral, 6=Root
+    const unsigned int (* const Chakra[7])[4] = {
+        &Sahasrara_Crown,
+        &Ajna_ThirdEye,
+        &Vishuddha_Throat,
+        &Anahata_Heart,
+        &Manipura_SolarPlexus,
+        &Svadhisthana_Sacral,
+        &Muladhara_Root
+    };
 }
 
-// REFACTOR: Moved LEDStatus definitions outside the namespace for global access, as they are used across setup and loop.
-//           This avoids repetition and makes them reusable without redeclaration.
+// LED feedback objects (global so they can be used across setup() and loop())
 LEDStatus solidOrange(RGB_COLOR_ORANGE, LED_PATTERN_SOLID, LED_SPEED_NORMAL, LED_PRIORITY_NORMAL);
-LEDStatus solidGreen(RGB_COLOR_GREEN, LED_PATTERN_SOLID, LED_SPEED_NORMAL, LED_PRIORITY_NORMAL);
-LEDStatus solidRed(RGB_COLOR_RED, LED_PATTERN_SOLID, LED_SPEED_NORMAL, LED_PRIORITY_NORMAL);
-LEDStatus breathGray(RGB_COLOR_GRAY, LED_PATTERN_FADE, LED_SPEED_NORMAL, LED_PRIORITY_IMPORTANT);
+LEDStatus solidGreen (RGB_COLOR_GREEN,  LED_PATTERN_SOLID, LED_SPEED_NORMAL, LED_PRIORITY_NORMAL);
+LEDStatus solidRed   (RGB_COLOR_RED,    LED_PATTERN_SOLID, LED_SPEED_NORMAL, LED_PRIORITY_NORMAL);
+LEDStatus breathGray (RGB_COLOR_GRAY,   LED_PATTERN_FADE,  LED_SPEED_NORMAL, LED_PRIORITY_IMPORTANT);
 LEDStatus blinkMagenta(RGB_COLOR_MAGENTA, LED_PATTERN_BLINK, LED_SPEED_FAST, LED_PRIORITY_CRITICAL);
 
-// REFACTOR: Added enum for channel types to make code more readable and avoid magic strings/numbers.
-//           This helps in DRY by parameterizing channel-specific logic.
 enum ChannelType {
     CHAKRA,
     SOLNOG
+};
+
+// Simple non-blocking timer helper (renamed to avoid conflict with Particle's built-in Timer class)
+struct CustomTimer {
+    unsigned long interval;
+    unsigned long lastTrigger;
+
+    CustomTimer(unsigned long intervalMs) : interval(intervalMs), lastTrigger(0) {}
+
+    bool check(unsigned long now) {
+        if (now - lastTrigger >= interval) {
+            lastTrigger = now;
+            return true;
+        }
+        return false;
+    }
 };
 
 SYSTEM_THREAD(ENABLED);
 
 void setup()
 {
-    // REFACTOR: Added Serial (USB) for debugging—logs to Particle serial monitor.
-    //           This helps verify if/when commands are being sent without affecting Serial1.
-    Serial.begin(9600);  // USB serial for logging (connect via USB and use 'particle serial monitor')
-
-    // set LED pin to OUTPUT
+    Serial.begin(9600);        // USB serial for debugging (use `particle serial monitor`)
     pinMode(ledPin, OUTPUT);
-    // Start Particle LED Breathing Gray
+
     breathGray.setActive(true);
-    // Set the random seed that was got
-    random_seed_from_cloud(seed);
-    // Enables serial channel with specified configuration via TX/RX pins.
-    Serial1.begin(9600);
-    // Set initial start timers
-    startLongMillis = startChakraMillis = startSolNogMillis = millis();
-    // Delay 5 seconds
-    delay(5000);
-    // Stop Particle LED
+    delay(1000);               // Brief breathing pause at startup
+
+    randomSeed(rngSeed);       // Seed Arduino random() with hardware RNG
+
+    Serial1.begin(9600);       // Communication with FY3200S generator
+
+    // Initialize state
+    currentChakra       = 0;
+    currentChakraLevel  = 0;
+    currentSolNogIndex  = 0;
+
+    delay(4000);               // Allow generator to stabilize
+
     breathGray.setActive(false);
-    // Execute the setParameters method
-    setParameters(sP, duty, wave, amplitude);
-    // REFACTOR: Removed redundant breathGray.setActive(true); and final breathGray.setActive(false).
-    //           Consolidated LED control to avoid repetition. Setup now ends with parameters set and LEDs off.
+
+    setParameters(commandDelayMs, mainDuty, mainWave, mainAmplitude);
 }
 
-// REFACTOR: Extracted frequency setting into a function to DRY the duplicated logic for Chakra and SolNog channels.
-//           This reduces repetition in the loop for random selection and serial commands.
-// FIX: Changed to explicit "\r\n" termination (instead of println's "\n") as many devices require it.
-//      Added Serial1.flush() to ensure full transmission, especially on Photon 1's smaller buffer.
-//      Added USB serial logging for debugging.
-void setFrequency(ChannelType channel, unsigned char x, unsigned char y) {
-    String cmd;
-    unsigned int freqValue;
+// Send frequency command to the FY3200S generator
+void setFrequency(ChannelType channel, unsigned char chakra, unsigned char level)
+{
+    unsigned long freq;
 
     if (channel == CHAKRA) {
-        cmd = "df";
-        freqValue = Chakra[x][y];
-    } else { // SOLNOG
-        cmd = "bf";
-        freqValue = SolNog[x][y];
+        // chakra: 0–6 (Crown to Root), level: 0–3 intensity
+        freq = (*Chakra[chakra % 7])[level % 4];
+    } else {
+        // SolNog uses the index as lookup into Solfeggio table
+        freq = Solfeggio[level % 7];
     }
 
-    String fullCmd = cmd + String(freqValue);
-    Serial1.println(fullCmd);  // Use println() to match first code
-    Serial.println("Sent frequency: " + fullCmd);  // Debugging log
+    String cmd = (channel == CHAKRA) ? "df" : "bf";
+    String fullCmd = cmd + String(freq);
+
+    Serial1.println(fullCmd);
+    Serial1.flush();
+
+    Serial.printlnf("Sent %s: %lu Hz (chakra/level = %u/%u)",
+                    (channel == CHAKRA ? "Chakra" : "SolNog"), freq, chakra, level);
+    
+    // Publish to Particle cloud console (heavily rate-limited to avoid quota issues)
+    static unsigned long lastPublish = 0;
+    if (millis() - lastPublish > 300000) {  // max once every 5 minutes
+        Particle.publish("SSFH-PEMF", String::format("%s %luHz (c%u/l%u)", 
+                        (channel == CHAKRA ? "CH" : "SN"), freq, chakra, level), PRIVATE);
+        lastPublish = millis();
+    }
 }
 
-// REFACTOR: Extracted LED update logic into a function to DRY the repeated setActive calls and comparisons.
-//           This centralizes the if-else logic, making it easier to maintain and reducing code duplication.
-void updateLEDs(unsigned char yN, unsigned char yC) {
-    // First, stop all variable LEDs to reset state (DRY: avoids repeating in each branch)
+// Update RGB LED and D7 LED to reflect current Chakra vs SolNog dominance
+void updateLEDs(unsigned char solnogIndex, unsigned char chakraIndex)
+{
+    // Reset all status LEDs first
     blinkMagenta.setActive(false);
     solidOrange.setActive(false);
     solidGreen.setActive(false);
 
-    if (yN == yC) {
-        digitalWrite(ledPin, !digitalRead(ledPin)); // Change the state of the LED.
-        blinkMagenta.setActive(true);               // Start LED Blink Magenta
-        plant_a_seed_HAL();
-    } else if (yN > yC) {
-        digitalWrite(ledPin, HIGH);    // Turn the LED on.
-        solidOrange.setActive(true);   // Start LED Solid Orange
-    } else if (yN < yC) {
-        digitalWrite(ledPin, LOW);     // Turn the LED off.
-        solidGreen.setActive(true);    // Start LED Solid Green
+    if (solnogIndex == chakraIndex) {
+        // Sync state — this is the "stand in awe" magenta moment
+        digitalWrite(ledPin, !digitalRead(ledPin));
+        blinkMagenta.setActive(true);
+        reseedRNG();
+    }
+    else if (solnogIndex > chakraIndex) {
+        digitalWrite(ledPin, HIGH);
+        solidOrange.setActive(true);
+    }
+    else {
+        digitalWrite(ledPin, LOW);
+        solidGreen.setActive(true);
     }
 }
 
 void loop()
 {
-    // REFACTOR: Consolidated currentMillis assignments into one call per type, but kept separate for clarity.
-    //           Could use a single millis() call if optimizing further, but readability is prioritized.
-    currentLongMillis = millis();   // Get the current number of milliseconds since the program started
-    currentChakraMillis = millis(); // Get the current number of milliseconds since the program started
-    currentSolNogMillis = millis(); // Get the current number of milliseconds since the program started
-
-    if (currentLongMillis - startLongMillis >= longPeriod)
-    {
-        yC = random(7);                      // Random # (>= 0 and < x) Needs to match the array freqz[][y]
-        yN = random(7);                      // Random # (>= 0 and < x) Needs to match the array y value [][y]
-        startLongMillis = currentLongMillis; // Restart the long timer
-        updateLEDs(yN, yC);
+    // Publish initialization event once cloud is ready
+    static bool publishedInit = false;
+    if (!publishedInit && Particle.connected()) {
+        Particle.publish("SSFH-PEMF", "Device initialized - starting frequency hopping", PRIVATE);
+        publishedInit = true;
     }
 
+    unsigned long now = millis();
 
-    if (currentChakraMillis - startChakraMillis >= periodChakra) // Test whether the period has elapsed
-    {
-        xC = random(4); // Random # (>= 0 and < x) Needs to match the array freqz[x][]
-        setFrequency(CHAKRA, xC, yC);
-        startChakraMillis = currentChakraMillis; // Restart the Chakra timer
-        updateLEDs(yN, yC);
+    // Master timer — controls random reseeding and overall rhythm
+    // Master timer — controls random reseeding and overall rhythm
+    static CustomTimer longTimer(longPeriodMs);
+    if (longTimer.check(now)) {
+        currentChakra      = random(7);   // 0 = Crown ... 6 = Root
+        currentSolNogIndex = random(7);
+        updateLEDs(currentSolNogIndex, currentChakra);
     }
 
-    if (currentSolNogMillis - startSolNogMillis >= periodSolNog) // Test whether the period has elapsed
-    {
-        xN = random(3); // Random # (>= 0 and < x) Needs to match the array x value [x][]
-        setFrequency(SOLNOG, xN, yN);
-        startSolNogMillis = currentSolNogMillis; // Restart the SolNog timer
-        updateLEDs(yN, yC);
+    // Chakra frequency hopping
+    static CustomTimer chakraTimer(chakraPeriodMs);
+    if (chakraTimer.check(now)) {
+        currentChakra      = random(7);   // 0 = Crown ... 6 = Root
+        currentChakraLevel = random(4);   // intensity level for that chakra
+        setFrequency(CHAKRA, currentChakra, currentChakraLevel);
+        updateLEDs(currentSolNogIndex, currentChakra);
     }
 
+    // SolNog (Solfeggio + Nogier) frequency hopping
+    static CustomTimer solnogTimer(solnogPeriodMs);
+    if (solnogTimer.check(now)) {
+        currentSolNogIndex = random(3);
+        setFrequency(SOLNOG, currentSolNogIndex, currentSolNogIndex);
+        updateLEDs(currentSolNogIndex, currentChakra);
+    }
 }
 
-void random_seed_from_cloud(unsigned int seed)
+// Reseed the random number generator using hardware RNG
+void reseedRNG()
 {
-    // Override getting seed from cloud.
-    srand(seed);
+    rngSeed = HAL_RNG_GetRandomNumber();
+    randomSeed(rngSeed);
 }
 
-void plant_a_seed_HAL()
+// Initialize the FY3200S generator with base waveform, duty, amplitude, etc.
+// Sends both "main" and "secondary" channel parameter sets.
+void setParameters(unsigned long delayMs, unsigned int duty, unsigned char wave, unsigned int amplitude)
 {
-    seed = HAL_RNG_GetRandomNumber();
-    random_seed_from_cloud(seed);
-    // REFACTOR: Removed redundant blinkMagenta.setActive(false); as it's now handled in updateLEDs().
-}
+    digitalWrite(ledPin, !digitalRead(ledPin));
 
-// REFACTOR: Simplified setParameters by using a loop for main/secondary settings.
-//           This DRYs the repeated Serial1.print/delay patterns for duty, wave, amplitude.
-//           Added comments to explain the parameterization.
-// FIX: Changed to explicit "\r\n" termination and added Serial1.flush() for each command.
-//      Added USB serial logging for debugging.
-void setParameters(unsigned int sP, unsigned int duty, unsigned char wave, unsigned int amplitude)
-{
-    digitalWrite(ledPin, !digitalRead(ledPin)); // Change the state of the LED.
+    // Main channel parameters (bd = duty, bw = wave, ba = amplitude)
+    const char* mainCmds[3] = {"bd", "bw", "ba"};
+    const unsigned long values[3] = {duty, wave, amplitude};
+    LEDStatus* mainLEDs[3] = {&solidOrange, &solidGreen, &solidRed};
 
-    // REFACTOR: Define arrays for commands and corresponding LED statuses to loop over.
-    //           This avoids hardcoding each Serial1.print/delay/LED sequence multiple times.
-    const char* mainCmds[] = {"bd", "bw", "ba"}; // Main: duty, wave, amplitude
-    const unsigned int values[] = {duty, (unsigned int)wave, amplitude};
-    LEDStatus* mainLEDs[] = {&solidOrange, &solidGreen, &solidRed};
-
-    const char* secondaryCmds[] = {"da", "dw", "dd"}; // Secondary: amplitude, wave, duty (note order differs)
-    LEDStatus* secondaryLEDs[] = {&solidRed, &solidGreen, &solidOrange};
-
-    // Set main parameters
     for (int i = 0; i < 3; ++i) {
         mainLEDs[i]->setActive(true);
-        String fullCmd = String(mainCmds[i]) + String(values[i]);
-        Serial1.println(fullCmd);  // Use println()
-        delay(sP);
+        String cmd = String(mainCmds[i]) + String(values[i]);
+        Serial1.println(cmd);
+        Serial1.flush();
+        delay(delayMs);
     }
 
-    digitalWrite(ledPin, !digitalRead(ledPin)); // Change the state of the LED.
+    digitalWrite(ledPin, !digitalRead(ledPin));
 
-    // Set secondary parameters (reusing values array, but in different order)
+    // Secondary channel parameters (different order: da, dw, dd)
+    const char* secondaryCmds[3] = {"da", "dw", "dd"};
+    LEDStatus* secondaryLEDs[3] = {&solidRed, &solidGreen, &solidOrange};
+
     for (int i = 0; i < 3; ++i) {
-        String fullCmd = String(secondaryCmds[i]) + String(values[2 - i]);
-        Serial1.println(fullCmd);  // Use println()
-        delay(sP);
+        String cmd = String(secondaryCmds[i]) + String(values[2 - i]);
+        Serial1.println(cmd);
+        Serial1.flush();
+        delay(delayMs);
         secondaryLEDs[i]->setActive(false);
     }
 
